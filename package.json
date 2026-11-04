@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-relocator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "把 DSH 插件安装到用户指定目录，并为每个插件维护独立目录与独立依赖：迁出 / 恢复 / 体检 / 回滚。",
   "type": "module",
   "main": "lib/index.js",

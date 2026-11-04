@@ -128,13 +128,17 @@ C:/Users/<你>/.dsh/
 - **同盘校验**：根目录与 pnpm store 是否同盘；不同盘会明确提示"失去硬链接去重、占用会翻倍"
 - **store 路径**：默认 `<根>/.store/v11`
 - **默认策略**：新插件默认放在 `.dsh` 内 / 默认外置
+- **本体处理**（`bodyMode`）：迁移时把 `file:` 本体一起搬走（默认，推荐）/ 只搬依赖
+- **逐插件安装根**：可以给某个插件单独指定安装根，不必都用全局那个
+- **迁移成功后自动清空回收点**（默认关；开了就不保留回滚能力）
+- **界面显示位置**：只放设置页 / 只放侧边栏 / 两者都放（保存后立即切换，无需刷新）
 - **推荐阈值**：超过多少 MB 算"体积大"（默认 100）
 - **严格模式**：隐式依赖是否作为迁出的硬性前置条件（默认开）
 - **搬运方式**：`auto`（默认，同盘硬链接 / 跨盘自动复制）/ `link`（强制硬链接）/ `copy`（逐字节复制）
 
 ### 2. 插件列表
 列出全部已装插件：名称、版本、**物理位置**、**真实占用（按 inode 去重）**、**独占**、**硬链接共享**、依赖体检结果、是否受保护。
-每行操作：**迁出** / **恢复** / **忽略** / **打开目录**。
+每张卡片上：**迁出** / **恢复** / **忽略** / **打开目录**；卡片本身可点（打开插件目录）。
 支持按名称/体积/风险筛选与排序。
 
 三种口径一定要分清（界面上也写了）：
@@ -149,6 +153,18 @@ C:/Users/<你>/.dsh/
 
 ### 4. 进度与日志
 实时进度条（复制 → 校验 → 装依赖 → 切换 → 复检）、体检报告表、回滚点列表（一键回滚 / 清空）、操作历史。
+
+### 5. 外观与主题（0.2.0 重做）
+
+界面视觉按 dsh-taste 的 app-screen 规范重做过一轮，并桥接到宿主自己的主题令牌：
+
+- **跟随宿主明暗主题**：所有颜色取自宿主主题包定义的 `--dsw-alias-*` 令牌（写死的十六进制只是兜底），所以浅色主题下不会再出现"面板是深色的、周围是白的"那种错位。
+- **chrome 无彩色，蓝只给数据**：页签、按钮、筛选、表头全部中性灰；唯一的强调蓝只出现在体积条与「合计占用」那一格数值上。
+- **一屏一个实心按钮**：「测量体积」是该页签的主操作，行内的「迁出 / 采纳 / 忽略」一律描边或幽灵按钮。
+- **可读性**：正文 13px（最小 12.5px，全部 ≥11px）；数字统一 `tabular-nums` 右对齐；卡片边框用不透明灰（浅色 `#e8e8ea` / 暗色 `#2f2f33`），对比度约 1.2:1 —— 不刺眼，也不会糊成一片。
+- **布局**：插件列表与智能推荐用自适应卡片网格（`repeat(auto-fill, minmax(…, 1fr))`），宽了多列、窄了单列；侧边栏面板模式下页头与工具栏吸顶、列表区域自己滚到底。
+- **图标**：全部是内联描边 SVG，没有 emoji 字形。
+- **无障碍**：页签支持 ←/→/Home/End，卡片可 Tab 聚焦、Enter/Space 打开目录，骨架屏带 `aria-busy`，进度条带 `progressbar` 角色与 `aria-valuenow`。
 
 ---
 
@@ -259,6 +275,8 @@ node test/http-smoke.mjs
 - **A. 私有依赖留在插件自身 node_modules** —— 迁移后用 `createRequire` 从插件入口真的解析到 `<外置目录>/node_modules/my-private-dep`
 - **B. peer 依赖仍是安装侧单例** —— 插件目录里不存在第二份 `@deepseek-ai/cordis`；安装侧恰好一份
 - **C. 界面半身契约完好** —— `exports["./client"]` 存在，bundle 用 `__ModuleLoader__.load({ id: <包名> })` 包装，在 vm 里 stub 掉 loader 后能拿到 `{ apply, inject }`
+- **D. 完全体迁移** —— 本体随迁 + 独立依赖目录 + 迁移后 `pnpm install --frozen-lockfile` 能通过（package.json / pnpm-lock.yaml / .modules.yaml 三者一致）
+- **E. 孤儿本体与跨 profile 引用** —— `bodyReferences` 扫全部 profile 的 `file:` 引用；清理时可用 `relinkReferencing` 把别的 profile 改指到新位置
 - 以及：迁移后 junction / realpath / profile 声明正确；迁移→回滚 完全还原（文件数、声明、原路径）；迁移→恢复 回到 `.dsh`；`transferTree` + `verifyTrees` 往返校验通过；跨盘时 `checkDrives` 给出警告
 
 `http-smoke.mjs` 断言（38 项）：路由注册契约（prefix + 路径 + effect 释放）、
@@ -266,7 +284,7 @@ node test/http-smoke.mjs
 体检任务（`/doctor/run` 受理 → 留痕 → `/doctor/report` 有 `reclaim`）、握手边界
 （异源 403 `origin-rejected` / 缺 content-type 415 / 未知接口 404 / 坏 JSON 400 / 缺参数 502）。
 
-**当前实测：`self-test.mjs` 51 项全绿，`http-smoke.mjs` 38 项全绿。**
+**当前实测：`self-test.mjs` 75 项全绿，`http-smoke.mjs` 38 项全绿。**
 
 > 两条脚本都必须用真正的 Node 跑。在 DSH 自己的 `run_code` 里 `process.execPath` 是
 > `DeepSeek Harness.exe`（Electron），spawn 它会静默变成开 GUI。用内置运行时：
