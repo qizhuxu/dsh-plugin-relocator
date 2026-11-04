@@ -1,0 +1,13 @@
+# dsh-plugin-relocator 组合包补丁：把插件行插入 profile。
+#
+# 【规则】entry 的 id 必须全局唯一且与包名一致（DSH STORE 上架契约按 entryIds 比对，
+#         裸名会与其它插件冲突）；"id:" 那一行不能写行尾注释，商城预检用正则抓值。
+# 【半身绑定】浏览器半身由 package.json 的 dsh.client 声明，绑定在 name 为裸包名的
+#         这一行上（子路径行不携带半身）。
+# 【配置】这里的 config 只是默认值；运行时会与用户配置
+#         <DSH_HOME>/plugin-relocator/config.json 合并（后者优先，UI 写入的就是它）。
+#         所以正常使用不需要改本文件。
+- insert:
+    - id: dsh-plugin-relocator
+      name: 'dsh-plugin-relocator'
+      config: {}

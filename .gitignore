@@ -1,0 +1,8 @@
+node_modules/
+_bak/
+.lab/
+.lab-http/
+.taste-skill/
+.heredoc-probe*
+*.log
+tmp/
