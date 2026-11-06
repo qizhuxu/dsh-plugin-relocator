@@ -23,7 +23,21 @@ import { analyzeDeps } from "../lib/deps.js";
 import { transferTree, verifyTrees } from "../lib/transfer.js";
 import { validateRoot, rootFor, setPluginRoot } from "../lib/config.js";
 import { bodyInfo, bodyMovable, scanOrphanBodies, unionMeasure, verifyCovers } from "../lib/body.js";
-import { readJson, resolveDshHome, driveRoot, sameDrive } from "../lib/paths.js";
+import { readJson, resolveDshHome, driveRoot, sameDrive, humanBytes } from "../lib/paths.js";
+import {
+  Externals,
+  bestVersion,
+  classifySpec,
+  compareVersions,
+  contractOf,
+  gitUrlOf,
+  pluginDirsIn,
+  rootsOf,
+  satisfiesRange,
+  scanExternal,
+  setBundle,
+  specDir
+} from "../lib/external.js";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LAB = path.join(repo, ".lab");
@@ -488,6 +502,188 @@ section("J. 本体（file: 源）、孤儿与独立根");
   check("journal：last 记录状态与结果", snap2.last?.status === "ok" && snap2.last?.result?.ok === 1);
   jr.end(b, "failed", { error: "boom" });
   check("journal：全部结束后 active 为空", jr.snapshot().active === null);
+}
+
+/* ------------------------------------------------------------------ */
+section("K. 外置插件清单与生命周期（external.js）");
+{
+  // ---- 纯函数：来源分类 ----
+  check("classifySpec：版本号是 registry", classifySpec("0.6.7").kind === "registry");
+  check("classifySpec：^range 也是 registry", classifySpec("^1.2.0").kind === "registry");
+  check("classifySpec：link: 是本地目录", classifySpec("link:F:/x/y").kind === "file" && classifySpec("file:../x").kind === "file");
+  check("classifySpec：github 简写是 git", classifySpec("github:o/r#abc").kind === "git" && classifySpec("git+https://github.com/o/r.git").kind === "git");
+  check("classifySpec：.tgz 是压缩包", classifySpec("https://x/y.tgz").kind === "tarball");
+  check("classifySpec：npm: 别名归为其它协议", classifySpec("npm:foo@1").kind === "unknown");
+  check("classifySpec：空值是未记录来源", classifySpec(null).kind === "unknown");
+  check("gitUrlOf：github 简写还原成 URL 且去掉 sha", gitUrlOf("github:qizhuxu/dsh-taste#abc123") === "https://github.com/qizhuxu/dsh-taste");
+  check("specDir：相对路径按 profile 解析", specDir("link:../out/x", PROFILE) === path.resolve(path.join(PROFILE, "..", "out", "x")));
+  check("specDir：非本地写法返回 null", specDir("1.2.3", PROFILE) === null);
+
+  // ---- 纯函数：版本比较与 range ----
+  check("compareVersions：语义比较而非字符串序", compareVersions("1.10.0", "1.9.9") > 0 && compareVersions("1.0.0", "1.0.0") === 0);
+  check("compareVersions：预发布低于正式版", compareVersions("2.0.0-rc.1", "2.0.0") < 0 && compareVersions("2.0.0", "2.0.0-rc.1") > 0);
+  check("satisfiesRange：^1.2.0 的上界是 2.0.0", satisfiesRange("1.9.9", "^1.2.0") && !satisfiesRange("2.0.0", "^1.2.0"));
+  check("satisfiesRange：^0.6.7 按 minor 进位", satisfiesRange("0.6.9", "^0.6.7") && !satisfiesRange("0.7.0", "^0.6.7"));
+  check("satisfiesRange：~1.2.7 只吃 patch", satisfiesRange("1.2.99", "~1.2.7") && !satisfiesRange("1.3.0", "~1.2.7"));
+  check("satisfiesRange：空格是 AND、|| 是 OR", satisfiesRange("2.1.0", ">=2.0.0 <3") && !satisfiesRange("3.0.0", ">=2.0.0 <3") && satisfiesRange("3.5.0", "^1.0.0 || >=3"));
+  check("satisfiesRange：latest/* 一律满足", satisfiesRange("9.9.9", "latest") && satisfiesRange("9.9.9", "*"));
+  check("bestVersion：取 range 内最高", bestVersion(["1.0.0", "1.4.2", "2.0.0"], "^1.0.0") === "1.4.2");
+  check("bestVersion：没有匹配返回 null", bestVersion(["2.0.0"], "^1.0.0") === null);
+
+  // ---- 契约判定 ----
+  const contractBundle = contractOf(path.join(PLUGIN_DIR));
+  check("contractOf：dsh.client + exports[\"./client\"] 都认", contractBundle.ok === true && contractBundle.client === true);
+  const contractBad = contractOf(LAB);
+  check("contractOf：普通目录判为不满足契约", contractBad.ok === false, String(contractBad.reason));
+
+  // ---- 扫描：四种挂载状态 ----
+  const H2 = path.join(LAB, "ext");
+  const P2 = path.join(H2, "profiles", "lab");
+  const R2 = path.join(LAB, "ext-root");
+  fs.rmSync(H2, { recursive: true, force: true });
+  const mkPlugin = (rel, pkg, extra = {}) => {
+    const dir = path.join(R2, ...rel.split("/"));
+    writeJson(path.join(dir, "package.json"), pkg);
+    writeFile(path.join(dir, "index.js"), "export const name = " + JSON.stringify(pkg.name) + ";\n");
+    if (pkg.dsh?.bundle?.patch) writeFile(path.join(dir, "cordis.patch.yml"), "- insert: []\n");
+    if (pkg.exports?.["./client"]) writeFile(path.join(dir, "lib", "client.js"), "window.__ModuleLoader__.load({ id: " + JSON.stringify(pkg.name) + ", factory: () => ({ apply() {}, inject: [] }) });\n");
+    if (extra.meta) writeJson(path.join(dir, ".relocator.json"), extra.meta);
+    return dir;
+  };
+  const mountedDir = mkPlugin("mounted-one", {
+    name: "mounted-one",
+    version: "1.1.0",
+    dsh: { bundle: { patch: "./cordis.patch.yml" }, client: { platform: "web", inject: [] } },
+    exports: { "./client": "./lib/client.js" }
+  }, { meta: { opId: "out-lab-1", mode: "out", plugin: "mounted-one", originalSpec: "1.1.0", targetDir: path.join(R2, "mounted-one") } });
+  const orphanDir = mkPlugin("orphan-one", {
+    name: "orphan-one",
+    version: "2.0.0",
+    main: "index.js",
+    dsh: { bundle: { patch: "./cordis.patch.yml" } }
+  }, { meta: { opId: "out-lab-2", mode: "out", plugin: "orphan-one", originalSpec: "github:owner/repo" } });
+  const brokenDir = mkPlugin("broken-dir", { name: "broken-dir", version: "0.0.1", main: "index.js" });
+  const scopedDir = mkPlugin("@scope/scoped-one", {
+    name: "@scope/scoped-one",
+    version: "3.0.0",
+    main: "index.js",
+    exports: { "./client": "./lib/client.js" }
+  });
+  mkPlugin(".relocator-trash/trashed-x", { name: "trashed-x", version: "0.0.2", dsh: { client: {} } });
+  // 影子目录（不在安装根里）：用来制造「同名依赖指向别处」这种挂载状态
+  const shadowScoped = path.join(LAB, "shadow", "@scope", "scoped-one");
+  writeJson(path.join(shadowScoped, "package.json"), { name: "@scope/scoped-one", version: "0.9.0", main: "index.js" });
+  writeFile(path.join(shadowScoped, "index.js"), "export const name = \"@scope/scoped-one\";\n");
+  writeJson(path.join(P2, "package.json"), {
+    name: "lab-ext-profile",
+    private: true,
+        dependencies: {
+      "mounted-one": "link:" + path.resolve(mountedDir).split(path.sep).join("/"),
+      // 同名但指向别处：用一个离线的影子目录，避免实验室联网去 registry 找它
+      "@scope/scoped-one": "link:" + path.resolve(shadowScoped).split(path.sep).join("/")
+    },
+    dsh: { profile: { bundles: ["mounted-one"] } }
+  });
+  writeJson(path.join(P2, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+
+  const dirs = pluginDirsIn(R2);
+  check("pluginDirsIn：含 @scope 两级、跳过回收站", dirs.includes("@scope/scoped-one") && dirs.includes("mounted-one") && !dirs.some((d) => d.includes("trash")), dirs.join(","));
+  check("rootsOf：全局根 + 逐插件根去重", rootsOf({ root: R2, roots: { a: R2, b: path.join(LAB, "per") } }).length === 2);
+
+  const scan = scanExternal({ home: H2, profileDir: P2, config: { root: R2 } });
+  check("scanExternal：总数只算真插件（含 scope）", scan.counts.total === 4, JSON.stringify(scan.counts));
+  check("scanExternal：已挂载判定", scan.items.find((i) => i.name === "mounted-one").mount.state === "mounted");
+  check("scanExternal：未挂载判定", scan.items.find((i) => i.name === "orphan-one").mount.state === "unmounted");
+  check("scanExternal：同名但指向别处", scan.items.find((i) => i.name === "@scope/scoped-one").mount.state === "mounted-elsewhere");
+  check("scanExternal：不满足契约判为 broken", scan.items.find((i) => i.name === "broken-dir").mount.state === "broken");
+  const orphanItem = scan.items.find((i) => i.name === "orphan-one");
+  check("scanExternal：读出 .relocator.json 的来源类型", orphanItem.source.kind === "git" && orphanItem.originalSpec === "github:owner/repo");
+  check("scanExternal：带上 declared 依赖与体积字段位", Array.isArray(orphanItem.declared) && "size" in orphanItem);
+
+  // ---- bundles 增删 ----
+  const added = setBundle(P2, "orphan-one", true);
+  check("setBundle：加入 bundles", added.changed === true && readJson(path.join(P2, "package.json")).dsh.profile.bundles.includes("orphan-one"));
+  const addedAgain = setBundle(P2, "orphan-one", true);
+  check("setBundle：已在里面就不重复写", addedAgain.changed === false);
+  const removedBundle = setBundle(P2, "orphan-one", false);
+  check("setBundle：移出 bundles", removedBundle.changed === true && !readJson(path.join(P2, "package.json")).dsh.profile.bundles.includes("orphan-one"));
+
+  // ---- attach / detach / remove：用真实 pnpm（把真实 runtimes 链进实验室 home）----
+  const realRuntimes = path.join(resolveDshHome(), "dsh-runtimes");
+  const prettyPnpm = path.join(realRuntimes, "dsh-primary-runtime", "dependencies", "pnpm", "bin", "pnpm.mjs");
+  const hasPnpm = fs.existsSync(prettyPnpm);
+  if (hasPnpm) {
+    fs.symlinkSync(realRuntimes, path.join(H2, "dsh-runtimes"), "junction");
+  }
+  const journal2 = new Journal(path.join(H2, "journal.ndjson"));
+  const externals = new Externals({
+    home: H2,
+    profileDir: P2,
+    config: { root: R2, storeDir: path.join(R2, ".store", "v11"), registry: "https://registry.npmmirror.com/" },
+    journal: journal2,
+    locks: null
+  });
+
+  let attachFailed = null;
+  try {
+    await externals.attach("broken-dir");
+  } catch (error) {
+    attachFailed = String(error.message);
+  }
+  check("attach：不满足契约的目录被拒绝", !!attachFailed && attachFailed.includes("契约"), String(attachFailed));
+
+  let elsewhereFailed = null;
+  try {
+    await externals.attach("@scope/scoped-one");
+  } catch (error) {
+    elsewhereFailed = String(error.message);
+  }
+  check("attach：同名但挂到别处时默认拒绝（防止覆盖用户别的装法）", !!elsewhereFailed && elsewhereFailed.includes("已有同名依赖"), String(elsewhereFailed));
+
+  if (hasPnpm) {
+    const attached = await externals.attach("orphan-one");
+    check("attach：写回 link: 声明", attached.ok === true && readJson(path.join(P2, "package.json")).dependencies["orphan-one"].startsWith("link:"), String(attached.spec));
+    check("attach：补回 bundles", readJson(path.join(P2, "package.json")).dsh.profile.bundles.includes("orphan-one"));
+    const nm = path.join(P2, "node_modules", "orphan-one");
+    check("attach：node_modules 里出现链接并指向外置目录",
+      fs.existsSync(nm) && path.resolve(fs.realpathSync.native(nm)).toLowerCase() === path.resolve(orphanDir).toLowerCase(),
+      fs.existsSync(nm) ? fs.realpathSync.native(nm) : "缺失");
+    check("attach：pnpm install 已把 spec 同步进 lock",
+      fs.readFileSync(path.join(P2, "pnpm-lock.yaml"), "utf8").includes("orphan-one"));
+
+    const forced = await externals.attach("@scope/scoped-one", { force: true });
+    check("attach：force 可以接管挂到别处的同名依赖", forced.ok === true && readJson(path.join(P2, "package.json")).dependencies["@scope/scoped-one"].startsWith("link:"));
+
+    const detached = await externals.detach("orphan-one");
+    const afterDetach = readJson(path.join(P2, "package.json"));
+    check("detach：profile 里不再有该依赖", !afterDetach.dependencies["orphan-one"] && detached.ok === true);
+    check("detach：外置目录本体原样保留", fs.existsSync(path.join(orphanDir, "package.json")));
+    await externals.detach("@scope/scoped-one");
+  } else {
+    check("attach/detach：跳过（本机没有内置 pnpm，实验室无法真跑安装）", true, "跳过");
+  }
+
+  // ---- remove 与回收站 ----
+  const removed = await externals.remove("broken-dir", { detachFirst: true });
+  check("remove：目录被移出安装根", !fs.existsSync(brokenDir) && removed.ok === true);
+  check("remove：目录进了 <root>/.relocator-trash", fs.existsSync(path.join(R2, ".relocator-trash")) && fs.readdirSync(path.join(R2, ".relocator-trash")).length >= 1);
+  const trashed = externals.trashList();
+  check("trashList：能列出回收站条目与体积", trashed.length >= 1 && typeof trashed[0].bytes === "number", JSON.stringify(trashed.map((t) => t.name)));
+  const purgeAll = externals.purgeTrash(trashed.map((t) => t.name));
+  check("purgeTrash：清空后回收站为空", purgeAll.deleted.length === trashed.length && externals.trashList().length === 0, JSON.stringify(purgeAll.freedHuman));
+
+  // ---- check：离线分支（不联网）----
+  const localDir = mkPlugin("local-src", { name: "local-src", version: "0.1.0", main: "index.js" }, { meta: { opId: "out-lab-3", mode: "out", plugin: "local-src", originalSpec: "file:../somewhere" } });
+  const localCheck = await externals.check("local-src");
+  check("check：本地目录来源如实说明不支持自动检查", localCheck.ok === true && localCheck.supported === false && localCheck.kind === "file", String(localCheck.reason));
+  let checkMissing = null;
+  try {
+    await externals.check("no-such-plugin");
+  } catch (error) {
+    checkMissing = String(error.message);
+  }
+  check("check：不存在的插件给出明确错误", !!checkMissing && checkMissing.includes("没有找到"), String(checkMissing));
+  void localDir;
 }
 
 /* ------------------------------------------------------------------ */

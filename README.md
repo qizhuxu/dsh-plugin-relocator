@@ -154,7 +154,17 @@ C:/Users/<你>/.dsh/
 ### 4. 进度与日志
 实时进度条（复制 → 校验 → 装依赖 → 切换 → 复检）、体检报告表、回滚点列表（一键回滚 / 清空）、操作历史。
 
-### 5. 外观与主题（0.2.0 重做）
+### 5. 外置插件（0.2.x 新增）
+
+安装根里的**每一个**插件都在这里，包括 profile 里已经没有引用的那些：
+
+- **挂载状态**：`已挂载`（profile 里有一行 `link:` 指向它）/ `未挂载`（DSH 看不到它）/ `挂在别处`（profile 里同名依赖指向别的目录）/ `目录不完整`（缺 `dsh.bundle`/`dsh.client`/`exports["./client"]`）。
+- **来源**：迁出时记下的原始写法（registry 版本号、Git 仓库、压缩包、本地目录），决定"检查更新"能不能自动做。
+- **操作**：重新挂载 / 改指到这里 / 从 profile 摘除 / 检查更新 / 更新 / 打开目录 / 移入回收站；回收站单独一块，清空才真正释放空间。
+- **重新挂载** = 写回 `link:` 声明 → 补进 `dsh.profile.bundles` → 在 profile 里跑一次 `pnpm install` 同步 lock → 校验 `node_modules` 链接与三处写法一致；任何一步失败都会把 profile 的 `package.json` / `pnpm-lock.yaml` 还原。
+- 插件列表页顶部会在有未挂载插件时给一条提示，点一下直接跳到这一页。
+
+### 6. 外观与主题（0.2.0 重做）
 
 界面视觉按 dsh-taste 的 app-screen 规范重做过一轮，并桥接到宿主自己的主题令牌：
 
@@ -276,6 +286,7 @@ node test/http-smoke.mjs
 - **B. peer 依赖仍是安装侧单例** —— 插件目录里不存在第二份 `@deepseek-ai/cordis`；安装侧恰好一份
 - **C. 界面半身契约完好** —— `exports["./client"]` 存在，bundle 用 `__ModuleLoader__.load({ id: <包名> })` 包装，在 vm 里 stub 掉 loader 后能拿到 `{ apply, inject }`
 - **D. 完全体迁移** —— 本体随迁 + 独立依赖目录 + 迁移后 `pnpm install --frozen-lockfile` 能通过（package.json / pnpm-lock.yaml / .modules.yaml 三者一致）
+- **F. 外置插件清单与生命周期（external.js）** —— 来源分类、版本比较与 range、DSH 插件契约判定、安装根扫描（含 @scope 两级、跳过回收站）、四种挂载状态、bundles 增删、attach 的拒绝路径与真实 pnpm 下的 attach/detach、remove 与回收站清空
 - **E. 孤儿本体与跨 profile 引用** —— `bodyReferences` 扫全部 profile 的 `file:` 引用；清理时可用 `relinkReferencing` 把别的 profile 改指到新位置
 - 以及：迁移后 junction / realpath / profile 声明正确；迁移→回滚 完全还原（文件数、声明、原路径）；迁移→恢复 回到 `.dsh`；`transferTree` + `verifyTrees` 往返校验通过；跨盘时 `checkDrives` 给出警告
 
@@ -284,7 +295,7 @@ node test/http-smoke.mjs
 体检任务（`/doctor/run` 受理 → 留痕 → `/doctor/report` 有 `reclaim`）、握手边界
 （异源 403 `origin-rejected` / 缺 content-type 415 / 未知接口 404 / 坏 JSON 400 / 缺参数 502）。
 
-**当前实测：`self-test.mjs` 75 项全绿，`http-smoke.mjs` 38 项全绿。**
+**当前实测：`self-test.mjs` 123 项全绿，`http-smoke.mjs` 38 项全绿。**
 
 > 两条脚本都必须用真正的 Node 跑。在 DSH 自己的 `run_code` 里 `process.execPath` 是
 > `DeepSeek Harness.exe`（Electron），spawn 它会静默变成开 GUI。用内置运行时：
@@ -301,10 +312,34 @@ node test/http-smoke.mjs
 `/status` `/config/get` `/config/set` `/config/validate` `/plugins/list` `/plugins/measure`
 `/recommend` `/ignore/set` `/policy/set` `/migrate/out` `/migrate/restore` `/migrate/rollback`
 `/migrate/purge` `/rollback/list` `/doctor/run` `/doctor/report` `/progress` `/history` `/open/path`
+`/external/scan` `/external/attach` `/external/detach` `/external/check` `/external/update` `/external/remove` `/external/trash` `/external/trash/purge`
 
 长任务（全量测量、迁移、恢复、回滚、体检）一律后台执行并立即返回 `{started:true,key}`，
 界面侧轮询 `/progress` 与 `/history`。
 
-## 十一、许可证
+## 十一、外置插件的更新与"找回"
+
+外置插件在 DSH 自带插件管理器里会被当成**本地开发目录**，因而既没有更新按钮、也不能更新 —— 这不是配置错了，而是官方安装器的规则：它只对 `registry` 写法的依赖提供更新（内部判据是"这个包必须是从 registry 装的、且包名与依赖名一致"）。迁出后 profile 里那行是 `link:`，自然被排除在外。
+
+本插件的做法是**不欺骗官方管理器**（把写法改回 registry 会让 pnpm 把插件实体重新装进 profile，外置就白做了），而是**由外置工程自己更新**：
+
+~~~
+① 检查更新    registry → 读 dist-tags.latest 与"原 range 内最高版本"；Git → git ls-remote 取远端 HEAD
+② 更新        在 <安装根>/.relocator-tmp/<opId> 建临时工程 → pnpm add <来源> → 校验新版确实是 DSH 插件且版本更高
+③ 备份        旧本体 rename 到 <安装根>/.relocator-trash/<name>-<时间戳>（同盘瞬时）
+④ 就位        新版覆盖到外置目录，.relocator.json 追加 updateFrom/updateTo/lastSpec
+⑤ 独立依赖    按新 package.json 在外置目录里装依赖（老的 deps 判定规则不变）
+⑥ 校验        主入口在位、DSH 插件契约仍在；失败就把旧本体搬回来
+~~~
+
+更新完成后需要**重启一次 DSH** 才会加载新版本（宿主半身与界面半身都是启动时装载的）。
+
+**"插件列表里删掉之后外置目录还在，但列表里没了"怎么办？**
+
+那是官方卸载的正常行为：它只删 profile 侧的依赖与 junction，不会去动外置目录（那是它不认识的文件）。这时插件会出现在**外置插件**页的"未挂载"分组里，点「重新挂载」即可恢复；也可以先「检查更新」再挂载回来。
+
+**删除**：外置插件页的「移入回收站」会先把插件从 profile 摘除，再把目录 rename 到 `<安装根>/.relocator-trash/`。回收站里的东西不再被 DSH 看见，但还占着磁盘 —— 确认不要了再「清空回收站」。
+
+## 十二、许可证
 
 MIT
