@@ -34,6 +34,7 @@ import {
   pluginDirsIn,
   rootsOf,
   satisfiesRange,
+  registryUrls,
   scanExternal,
   setBundle,
   specDir
@@ -529,6 +530,12 @@ section("K. 外置插件清单与生命周期（external.js）");
   check("satisfiesRange：latest/* 一律满足", satisfiesRange("9.9.9", "latest") && satisfiesRange("9.9.9", "*"));
   check("bestVersion：取 range 内最高", bestVersion(["1.0.0", "1.4.2", "2.0.0"], "^1.0.0") === "1.4.2");
   check("bestVersion：没有匹配返回 null", bestVersion(["2.0.0"], "^1.0.0") === null);
+
+  // registry URL 构造：scope 的 @ 绝不能被编码成 %40（npmmirror 会回 422）
+  const urls = registryUrls("https://registry.npmmirror.com/", "@memef1f1y/dsh-plugin-tts");
+  check("registryUrls：scoped 包用 @scope%2fpkg 规范写法", urls[0] === "https://registry.npmmirror.com/@memef1f1y%2fdsh-plugin-tts", urls[0]);
+  check("registryUrls：绝不含 %40", !urls.some((u) => u.includes("%40")), urls.join(" "));
+  check("registryUrls：普通包名直接拼", registryUrls("https://r/", "dsh-ffmpeg")[0] === "https://r/dsh-ffmpeg");
 
   // ---- 契约判定 ----
   const contractBundle = contractOf(path.join(PLUGIN_DIR));
