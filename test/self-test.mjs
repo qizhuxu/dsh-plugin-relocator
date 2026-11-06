@@ -37,6 +37,7 @@ import {
   registryUrls,
   scanExternal,
   setBundle,
+  sourceSpecOf,
   specDir
 } from "../lib/external.js";
 
@@ -543,6 +544,10 @@ section("K. 外置插件清单与生命周期（external.js）");
   const contractBad = contractOf(LAB);
   check("contractOf：普通目录判为不满足契约", contractBad.ok === false, String(contractBad.reason));
 
+  // 来源优先级：sourceSpec（人工更正过的）> lastSpec（上次更新用的）> originalSpec（迁出时记下的）
+  check("sourceSpecOf：sourceSpec 优先", sourceSpecOf({ originalSpec: "a", lastSpec: "b", sourceSpec: "c" }) === "c");
+  check("sourceSpecOf：逐级回退到 originalSpec", sourceSpecOf({ originalSpec: "file:x" }) === "file:x" && sourceSpecOf({}) === null && sourceSpecOf(null) === null);
+
   // ---- 扫描：四种挂载状态 ----
   const H2 = path.join(LAB, "ext");
   const P2 = path.join(H2, "profiles", "lab");
@@ -615,6 +620,7 @@ section("K. 外置插件清单与生命周期（external.js）");
   const removedBundle = setBundle(P2, "orphan-one", false);
   check("setBundle：移出 bundles", removedBundle.changed === true && !readJson(path.join(P2, "package.json")).dsh.profile.bundles.includes("orphan-one"));
 
+
   // ---- attach / detach / remove：用真实 pnpm（把真实 runtimes 链进实验室 home）----
   const realRuntimes = path.join(resolveDshHome(), "dsh-runtimes");
   const prettyPnpm = path.join(realRuntimes, "dsh-primary-runtime", "dependencies", "pnpm", "bin", "pnpm.mjs");
@@ -630,6 +636,24 @@ section("K. 外置插件清单与生命周期（external.js）");
     journal: journal2,
     locks: null
   });
+
+
+  // 更正来源：写 sourceSpec、不动 originalSpec，之后扫描与检查都用新来源
+  const setResult = externals.setSource("orphan-one", "github:Minglink/dsh-infinite-gen-5");
+  check("setSource：识别来源类型并返回", setResult.kind === "git" && setResult.sourceSpec === "github:Minglink/dsh-infinite-gen-5", JSON.stringify({ kind: setResult.kind }));
+  const metaAfterSource = readJson(path.join(orphanDir, ".relocator.json"), {});
+  check("setSource：写进 sourceSpec 且 originalSpec 保持不变",
+    metaAfterSource.sourceSpec === "github:Minglink/dsh-infinite-gen-5" && metaAfterSource.originalSpec === "github:owner/repo",
+    JSON.stringify({ sourceSpec: metaAfterSource.sourceSpec, originalSpec: metaAfterSource.originalSpec }));
+  const itemAfterSource = externals.find("orphan-one");
+  check("setSource：清单里的来源随之改变", itemAfterSource.originalSpec === "github:Minglink/dsh-infinite-gen-5" && itemAfterSource.source.kind === "git");
+  let badSource = null;
+  try {
+    externals.setSource("orphan-one", "workspace:../x");
+  } catch (error) {
+    badSource = String(error.message);
+  }
+  check("setSource：认不出的来源写法被拒绝", !!badSource && badSource.includes("认不出"), String(badSource));
 
   let attachFailed = null;
   try {
