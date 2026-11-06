@@ -690,6 +690,25 @@ section("K. 外置插件清单与生命周期（external.js）");
     check("detach：profile 里不再有该依赖", !afterDetach.dependencies["orphan-one"] && detached.ok === true);
     check("detach：外置目录本体原样保留", fs.existsSync(path.join(orphanDir, "package.json")));
     await externals.detach("@scope/scoped-one");
+
+    // 恢复到 .dsh：此时 orphan-one 已摘除（未挂载），应当先自动挂回 profile 再搬进 .dsh
+    const extMigrator = new Migrator({
+      home: H2,
+      profileDir: P2,
+      config: { root: R2, storeDir: path.join(R2, ".store", "v11"), registry: "https://registry.npmmirror.com/", transferMode: "auto", hashSamples: 0, syncProfileLockfile: false },
+      journal: journal2,
+      locks: new Locks(path.join(H2, "locks.json"))
+    });
+    externals.migrator = extMigrator;
+    const restored = await externals.restoreToDsh("orphan-one");
+    check("restoreToDsh：未挂载时会先自动挂回 profile", restored.ok === true && restored.attached === true, JSON.stringify({ attached: restored.attached }));
+    check("restoreToDsh：写回原来的依赖写法", readJson(path.join(P2, "package.json")).dependencies["orphan-one"] === "github:owner/repo", String(readJson(path.join(P2, "package.json")).dependencies["orphan-one"]));
+    const restoredDir = path.join(P2, "node_modules", "orphan-one");
+    check("restoreToDsh：本体搬回 node_modules 且不再是指向外置的链接",
+      fs.existsSync(path.join(restoredDir, "package.json")) && !fs.lstatSync(restoredDir).isSymbolicLink(),
+      fs.existsSync(restoredDir) ? (fs.lstatSync(restoredDir).isSymbolicLink() ? "仍是链接" : "实体目录") : "缺失");
+    check("restoreToDsh：外置目录挪到备份位", !fs.existsSync(orphanDir) && fs.existsSync(restored.targetDir + ".relocator-backup-" + restored.opId), String(restored.targetDir));
+    check("restoreToDsh：日志里留了记录", journal2.history(20).some((item) => item.op === "restore-to-dsh" && item.plugin === "orphan-one"));
   } else {
     check("attach/detach：跳过（本机没有内置 pnpm，实验室无法真跑安装）", true, "跳过");
   }
